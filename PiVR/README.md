@@ -1,50 +1,132 @@
-# PiVR
+# PiVR Artifact
 
-PiVR 是本仓库中用于模型修复与实验复现的主要代码目录，当前已经整理出三类实验入口，分别对应安全性、后门修复和公平性三个任务。
+This repository provides the anonymized artifact for **PiVR: Pathway-Guided Neural Network Repair via Intervention Verification**.
 
-## 主要实验入口
+Anonymous artifact link:
 
-- **安全性实验**：`experiments/exp_safety_acas.py`
-- **后门修复实验**：`experiments/exp_backdoor_removal_multi.py`
-- **公平性实验**：`Socrates/source/run_fairness_cprepair_benchmark.py`
+```text
+https://anonymous.4open.science/r/pivr-artifact-7FD3
+```
 
+PiVR is a pathway-guided neural network repair framework. It repairs defective neural networks through three main stages:
 
-## PiVR 流程概览
+1. **Repair-Oriented Pathway Localization**
+2. **Intervention-Based Verification**
+3. **Pathway-Constrained Repair**
 
-PiVR 当前实现可以概括为三步：
+The current artifact includes the PiVR source code, experiment entry scripts, utility modules, dependency file, and result files for inspection. Large benchmark datasets and pretrained models are **not included** in this repository because they are large and may exceed practical repository size limits.
 
-1. **Pathway Localization**：定位可疑神经元或路径。
-2. **Causal Verification**：验证可疑区域是否与错误行为相关。
-3. **Imitation Repair**：根据参考样本执行修复。
+## Repository Structure
 
+```text
+PiVR/
+├── experiments/
+│   ├── exp_safety_acas.py
+│   ├── exp_backdoor_removal_multi.py
+│   └── run_fairness_pivr_benchmark.py
+├── lrp_src/
+├── methods/
+│   ├── pathway.py
+│   ├── verifier.py
+│   └── repair.py
+├── benchmark/
+│   └── benchmark/        # not included in the artifact; see instructions below
+├── README.md
+├── requirements.txt
+└── utils.py
+```
 
-## 环境依赖
+## Main Experiment Entry Points
 
-项目主要依赖 Python 3.10.14，以及以下核心包：
+The artifact contains three experiment entry scripts:
 
-安装方式：
+- **Safety repair**: `experiments/exp_safety_acas.py`
+- **Backdoor removal**: `experiments/exp_backdoor_removal_multi.py`
+- **Fairness repair**: `experiments/run_fairness_pivr_benchmark.py`
+
+## Benchmark Data and Model Files
+
+The benchmark datasets and pretrained models are not uploaded to this anonymous repository due to file-size constraints. To reproduce the full experiments, please place the required benchmark files under the following directory structure:
+
+```text
+PiVR/
+└── benchmark/
+    └── benchmark/
+        ├── acas_N19/
+        ├── acas_N29/
+        ├── acas_N33/
+        ├── cifar_nnrepair/
+        ├── gtsrb_nnrepair/
+        ├── mnist_nnrepair/
+        ├── fmnist_nnrepair/
+        └── causal/
+```
+
+The expected locations are:
+
+- Backdoor datasets and pretrained backdoored models:
+  - `PiVR/benchmark/benchmark/`
+- ACAS Xu safety datasets and models:
+  - `PiVR/benchmark/benchmark/`
+- Fairness datasets and models:
+  - `PiVR/benchmark/benchmark/causal/`
+
+After placing the benchmark files in these directories, the experiment scripts can load them using relative paths.
+
+## Environment
+
+The experiments were developed with:
+
+```text
+Python 3.10.14
+PyTorch
+NumPy
+SciPy
+scikit-learn
+pandas
+h5py
+```
+
+Install dependencies with:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## 运行方式
+A CUDA-enabled GPU is recommended for the vision repair experiments.
 
-### 安全性实验
+## How to Run
+
+Run the following commands from the `PiVR/` directory.
+
+### Safety Repair
 
 ```bash
 python experiments/exp_safety_acas.py --subnetwork "N2,9"
 ```
 
-### 后门修复实验
+Other evaluated ACAS Xu subjects include `N3,3` and `N1,9`, depending on the benchmark files placed under `benchmark/benchmark/`.
+
+### Backdoor Removal
 
 ```bash
-python experiments/exp_backdoor_removal_multi.py --dataset MNIST
+python experiments/exp_backdoor_removal_multi.py --dataset GTSRB
 ```
 
-### 公平性实验
+Other supported datasets include `MNIST`, `Fashion-MNIST`, and `CIFAR-10`, depending on the available benchmark files.
+
+### Fairness Repair
 
 ```bash
-python Socrates/source/run_fairness_pivr_benchmark.py --dataset bank --attribute age
+python experiments/run_fairness_pivr_benchmark.py --dataset bank --attribute age
 ```
 
+Other fairness settings depend on the tabular datasets and models placed under `benchmark/benchmark/causal/`.
+
+## Result Files
+
+This artifact may include result files used for checking the reported experimental outcomes. These files are provided to help reviewers inspect the main results even when the large benchmark files are not included.
+
+## Notes for Double-Anonymous Review
+
+This repository has been prepared for double-anonymous review. It is intended to contain only anonymized code, scripts, configurations, result files, and reproduction instructions. The benchmark datasets and pretrained models are omitted because of size constraints.

@@ -125,7 +125,7 @@ Other fairness settings depend on the tabular datasets and models placed under `
 
 ## Result Files
 
-This artifact may include result files used for checking the reported experimental outcomes. These files are provided to help reviewers inspect the main results even when the large benchmark files are not included.
+This artifact include result files used for checking the reported experimental outcomes. 
 
 ## Notes for Double-Anonymous Review
 

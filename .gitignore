@@ -1,0 +1,11 @@
+# Do not upload benchmark datasets/models
+PiVR/benchmark/
+
+# IDE files
+.idea/
+PiVR/.idea/
+
+# Python cache
+__pycache__/
+*.pyc
+PiVR/__pycache__/

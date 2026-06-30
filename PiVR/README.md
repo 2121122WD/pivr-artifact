@@ -5,7 +5,7 @@ This repository provides the anonymized artifact for **PiVR: Pathway-Guided Neur
 Anonymous artifact link:
 
 ```text
-https://anonymous.4open.science/r/pivr-artifact-7FD3
+https://anonymous.4open.science/status/pivr-artifact-D1F1
 ```
 
 PiVR is a pathway-guided neural network repair framework. It repairs defective neural networks through three main stages:

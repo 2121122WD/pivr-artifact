@@ -126,11 +126,12 @@ class CausalVerifier:
 
     def _extract_reference_features(self, sample):
         """
-        提取 reference selection 用的 feature 表示。
-        默认使用最后一个 Conv2d/Linear 层的输出：
-        - Conv2d -> GAP 到 [B, C]
-        - Linear -> 直接 [B, D]
-        若无法提取，则回退到输入展平。
+        Extract feature representations for reference selection.
+
+        By default, use the output of the last Conv2d/Linear layer:
+        - Conv2d -> apply GAP to obtain [B, C].
+        - Linear -> use the direct [B, D] output.
+        If feature extraction fails, fall back to the flattened input.
         """
         if not isinstance(sample, torch.Tensor):
             sample = torch.tensor(sample)
@@ -165,7 +166,7 @@ class CausalVerifier:
         return features["value"].detach().cpu()
 
     def _pair_distance(self, source_vec: torch.Tensor, candidate_vecs: torch.Tensor) -> torch.Tensor:
-        """根据 reference_metric 计算 source 与 candidate batch 的距离。"""
+        """Compute distances between the source vector and the candidate batch according to reference_metric."""
         if self.reference_metric == "input_l2" or self.reference_metric == "feature_l2":
             return torch.norm(candidate_vecs - source_vec.unsqueeze(0), dim=1)
 
@@ -226,10 +227,12 @@ class CausalVerifier:
     def find_nearest_positive_sample(self, buggy_sample, target_class,
                                        argmin_mode: bool = False):
         """
-        Step A: 溯因 (Abduction) - 寻找反事实参照样本
-        逻辑：在训练集中找 Top-5 个与 buggy_sample 最像，且预测为 target_class 的正确样本。
-        返回 shape = [K, ...] 的 batch tensor，作为 latent prototype 的候选集合。
-        
+        Step A: Abduction - find counterfactual reference samples.
+
+        Search the training set for the Top-5 samples that are most similar to
+        buggy_sample and are correctly predicted as target_class. Return a batch
+        tensor of shape [K, ...] as candidate latent prototypes.
+
         Args:
             argmin_mode: If True, use argmin for prediction check (ACAS Xu safety tasks).
                          If False, use argmax (classification/fairness tasks).
@@ -237,7 +240,6 @@ class CausalVerifier:
         top_k = 5
         candidate_pool = []
 
-        # 根据配置在输入空间或特征空间中做 reference 检索
         if self.reference_metric.startswith("feature_"):
             buggy_vec = self._extract_reference_features(buggy_sample).view(1, -1).squeeze(0)
         else:
@@ -248,21 +250,18 @@ class CausalVerifier:
         self.model.eval()
         with torch.no_grad():
             for batch_data, batch_target in self.cached_train_data:
-                # 筛选出属于目标类别（正确类别）的样本
                 mask = (batch_target == target_class)
                 if mask.sum() == 0:
                     continue
 
                 candidates = batch_data[mask]
 
-                # 验证这些候选样本的预测是否正确
                 candidate_logits = self.model(candidates.to(self.device))
                 if argmin_mode:
                     candidate_preds = torch.argmin(candidate_logits, dim=1).cpu()
                 else:
                     candidate_preds = torch.argmax(candidate_logits, dim=1).cpu()
 
-                # 只保留预测正确的样本
                 correct_mask = (candidate_preds == target_class)
                 if correct_mask.sum() == 0:
                     continue
@@ -288,8 +287,10 @@ class CausalVerifier:
 
     def get_layer_activations(self, sample, layer_indices):
         """
-        辅助函数：获取样本在指定层的激活值。
-        支持单样本 `[D] / [C,H,W]` 和 batch `[B,D] / [B,C,H,W]`。
+        Helper function for obtaining activations at selected layers.
+
+        Supports both single samples `[D] / [C, H, W]` and batches
+        `[B, D] / [B, C, H, W]`.
         """
         activations = {}
         hooks = []
@@ -299,7 +300,6 @@ class CausalVerifier:
                 activations[layer_idx] = output.detach().clone()
             return hook
 
-        # 注册 Hooks
         tracked_count = 0
         for layer in self.layers_structure:
             if isinstance(layer, (nn.Linear, nn.Conv2d)):
@@ -316,7 +316,7 @@ class CausalVerifier:
         else:
             sample_input = sample
 
-        # 前向传播
+        # Forward pass.
         self.model.eval()
         with torch.no_grad():
             self.model(sample_input)
@@ -333,28 +333,30 @@ class CausalVerifier:
                               fairness_dataset_name: str = None,
                               safe_labels=None):
         """
-        Step B: 介入与验证 (Intervention & Verification) - CCBR 思想
-        逻辑：强制把 buggy_sample 在 pathway_masks 位置的值，替换为 ref_sample 的 latent prototype。
+        Step B: Intervention and verification, following the CCBR-style idea.
+
+        Force the values of buggy_sample at pathway_masks positions to be
+        replaced by the latent prototype activations from ref_sample.
 
         Args:
-            pathway_masks: List[Tensor], 上一步生成的 layer_masks
-            target_class: 用于 target-aware SCE 的目标类别
-            argmin_mode: 若为 True，用 argmin 评估干预后预测（适用于 ACAS Xu 安全任务）；
-                         否则用 argmax（适用于分类/公平性任务）。
-            fairness_mode: 若为 True，则计算 fairness-aware SCE，衡量干预后
-                           counterfactual discrepancy 是否下降，而非 target-class gain。
-            fairness_flip_fn: 公平性任务中翻转敏感属性的函数。
-            fairness_sensitive_indices: 敏感属性索引列表。
-            fairness_dataset_name: 公平性数据集名称。
+            pathway_masks: List[Tensor], layer masks generated by the previous step.
+            target_class: Target class used for target-aware SCE.
+            argmin_mode: If True, evaluate the post-intervention prediction with
+                         argmin, which is suitable for ACAS Xu safety tasks.
+                         Otherwise use argmax for classification/fairness tasks.
+            fairness_mode: If True, compute fairness-aware SCE by measuring whether
+                           counterfactual discrepancy decreases after intervention,
+                           instead of measuring target-class gain.
+            fairness_flip_fn: Function for flipping sensitive attributes in fairness tasks.
+            fairness_sensitive_indices: List of sensitive attribute indices.
+            fairness_dataset_name: Fairness dataset name.
         """
-        # 1. 获取参考样本 batch (Top-5 latent prototype candidates) 的激活值
         ref_activations_batch = self.get_layer_activations(ref_sample, range(len(pathway_masks)))
         ref_activations = {
             layer_idx: act.mean(dim=0, keepdim=True)
             for layer_idx, act in ref_activations_batch.items()
         }
 
-        # 2. 定义 Hook：执行介入 (Intervention)
         hooks = []
         normalized_masks = [
             torch.from_numpy(mask).float().to(self.device)
@@ -395,7 +397,6 @@ class CausalVerifier:
         else:
             buggy_input = buggy_sample
 
-        # 3. 介入后预测 (Counterfactual Prediction)
         self.model.eval()
         with torch.no_grad():
             logits_do = self.model(buggy_input)
@@ -407,7 +408,7 @@ class CausalVerifier:
         for h in hooks:
             h.remove()
 
-        # 4. 原始预测
+        # 4. Original prediction.
         with torch.no_grad():
             logits_orig = self.model(buggy_input)
             if argmin_mode:
@@ -419,7 +420,6 @@ class CausalVerifier:
         if safe_labels is not None:
             safe_label_set = sorted({int(lbl) for lbl in safe_labels})
 
-        # 5. 计算 SCE
         if fairness_mode:
             if fairness_flip_fn is None or fairness_sensitive_indices is None:
                 raise ValueError("fairness_mode=True requires fairness_flip_fn and fairness_sensitive_indices")
@@ -436,7 +436,6 @@ class CausalVerifier:
             with torch.no_grad():
                 logits_flip_orig = self.model(buggy_flip)
 
-            # 对 flipped sample 也施加同样的 pathway intervention
             fairness_hooks = []
             tracked_count = 0
             for layer in self.layers_structure:

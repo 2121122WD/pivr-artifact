@@ -1,5 +1,4 @@
 
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,14 +10,14 @@ from torch.utils.data import DataLoader
 
 class ImitationRepair:
 
-    
+
     def __init__(self, model, layers_structure, pathway_masks, device="cpu"):
 
         self.model = model
         self.layers_structure = layers_structure
         self.device = device
-        
-        # 将 pathway_masks 转换为 torch tensor
+
+        # Convert pathway_masks to torch tensors.
         self.pathway_masks = []
         for mask in pathway_masks:
             if isinstance(mask, np.ndarray):
@@ -27,7 +26,7 @@ class ImitationRepair:
                 self.pathway_masks.append(mask.float().to(device))
             else:
                 raise ValueError(f"Unsupported mask type: {type(mask)}")
-        
+
     def get_pathway_params(self):
 
         params = []
@@ -35,7 +34,7 @@ class ImitationRepair:
         for layer in self.layers_structure:
             if isinstance(layer, (nn.Linear, nn.Conv2d)):
                 if mask_idx < len(self.pathway_masks):
-                    # 只有 mask 中有 1 的层才加入优化
+                    # Optimize only layers whose mask contains selected units.
                     mask = self.pathway_masks[mask_idx]
                     if isinstance(mask, torch.Tensor):
                         mask_sum = mask.sum().item()
@@ -50,26 +49,29 @@ class ImitationRepair:
 
     def _register_gradient_hooks(self, target_params):
         """
-        为路径参数注册梯度掩码 hooks（严格稀疏微调的核心，支持Linear和Conv2d）
-        
+        Register gradient-mask hooks for pathway parameters.
+
+        This is the core mechanism for strictly sparse fine-tuning and supports
+        both Linear and Conv2d layers.
+
         Args:
-            target_params: 需要优化的参数列表（Parameter 对象）
-            
+            target_params: List of parameters to optimize.
+
         Returns:
-            list: hook handles，用于后续移除
+            list: Hook handles used for later removal.
         """
         hooks = []
         mask_idx = 0
-        
-        # 将 target_params 转换为 set，使用 id() 来比较参数对象引用
+
+        # Convert target_params to a set and compare parameter object references by id().
         target_param_ids = {id(p) for p in target_params}
-        
+
         for layer in self.layers_structure:
             if isinstance(layer, (nn.Linear, nn.Conv2d)):
                 if mask_idx < len(self.pathway_masks):
                     mask = self.pathway_masks[mask_idx]
-                    
-                    # 为 weight 注册 hook（使用 id() 比较参数对象引用）
+
+                    # Register the weight hook and compare parameter object references by id().
                     if id(layer.weight) in target_param_ids:
                         def make_weight_hook(m, is_conv):
                             def hook(grad):
@@ -77,54 +79,57 @@ class ImitationRepair:
                                     if is_conv:
                                         # Conv2d: weight shape [out_channels, in_channels, kh, kw]
                                         # mask shape: [out_channels]
-                                        # 需要 unsqueeze 到 [out_channels, 1, 1, 1] 来广播
+                                        # Unsqueeze to [out_channels, 1, 1, 1] for broadcasting.
                                         return grad * m.view(-1, 1, 1, 1)
                                     else:
                                         # Linear: weight shape [out_features, in_features]
                                         # mask shape: [out_features]
-                                        # 需要 unsqueeze(1) 来广播到 [out_features, in_features]
+                                        # Use unsqueeze(1) for broadcasting to [out_features, in_features].
                                         return grad * m.unsqueeze(1)
                                 return grad
                             return hook
-                        
+
                         is_conv = isinstance(layer, nn.Conv2d)
                         h = layer.weight.register_hook(make_weight_hook(mask, is_conv))
                         hooks.append(h)
-                    
-                    # 为 bias 注册 hook（使用 id() 比较参数对象引用）
+
+                    # Register the bias hook and compare parameter object references by id().
                     if layer.bias is not None and id(layer.bias) in target_param_ids:
                         def make_bias_hook(m):
                             def hook(grad):
                                 if grad is not None:
-                                    # bias shape: [out_features] 或 [out_channels]
-                                    # mask shape: [out_features] 或 [out_channels]
+                                    # Bias shape: [out_features] or [out_channels].
+                                    # Mask shape: [out_features] or [out_channels].
                                     return grad * m
                                 return grad
                             return hook
-                        
+
                         h = layer.bias.register_hook(make_bias_hook(mask))
                         hooks.append(h)
-                    
+
                     mask_idx += 1
-        
+
         return hooks
 
     def _get_reference_activations(self, ref_sample):
         """
-        获取参考样本在各层的激活值（支持Linear和Conv2d层）。
-        支持单参考样本 `[C,H,W] / [D]`，也支持 Top-k 参考原型集 `[K,C,H,W] / [K,D]`。
-        对参考 batch 的激活取均值，得到单个 prototype 激活。
-        Conv2d 层做全局平均池化压缩到 `[1, C]`，与 pathway_masks 的 `[C]` 对齐。
-        
+        Get reference activations for each layer, supporting Linear and Conv2d layers.
+
+        The input can be a single reference sample `[C, H, W] / [D]` or a Top-k
+        reference prototype set `[K, C, H, W] / [K, D]`. For a reference batch,
+        activations are averaged to obtain one prototype activation. Conv2d
+        activations are compressed to `[1, C]` by global average pooling so that
+        they align with pathway masks of shape `[C]`.
+
         Args:
-            ref_sample: 单参考样本或参考样本 batch
-            
+            ref_sample: A single reference sample or a reference sample batch.
+
         Returns:
-            dict: 每层的激活值
+            dict: Layer-wise activations.
         """
         ref_acts = {}
         handles = []
-        
+
         def _prepare_reference_input(sample):
             if not isinstance(sample, torch.Tensor):
                 sample = torch.tensor(sample)
@@ -132,9 +137,9 @@ class ImitationRepair:
             if sample.dim() == 1 or sample.dim() == 3:
                 sample = sample.unsqueeze(0)
             return sample
-        
+
         ref_input = _prepare_reference_input(ref_sample)
-        
+
         def get_ref_hook(idx, is_conv):
             def hook(m, i, o):
                 if is_conv:
@@ -143,21 +148,21 @@ class ImitationRepair:
                 else:
                     ref_acts[idx] = o.detach().mean(dim=0, keepdim=True).clone()
             return hook
-            
+
         mask_count = 0
         for layer in self.layers_structure:
             if isinstance(layer, (nn.Linear, nn.Conv2d)):
                 is_conv = isinstance(layer, nn.Conv2d)
                 handles.append(layer.register_forward_hook(get_ref_hook(mask_count, is_conv)))
                 mask_count += 1
-                
+
         self.model.eval()
         with torch.no_grad():
             self.model(ref_input)
-        
+
         for h in handles:
             h.remove()
-        
+
         return ref_acts
 
     def _build_hard_pair_from_batch(self, batch_x, batch_y=None, mode="backdoor"):
@@ -461,37 +466,40 @@ class ImitationRepair:
                contrastive_mode: bool = False,
                enable_rollback: bool = False):
         """
-        对单个样本进行修复（带安全回滚机制）
 
         Args:
-            buggy_sample: 错误样本 [C, H, W]
-            ref_sample: 参考样本（预测正确的相似样本）[C, H, W]
-            target_label: 目标标签（正确类别）
-            epochs: 微调轮数
-            lr: 学习率
-            lambda_reg: deprecated legacy parameter retained for compatibility
-            min_confidence: 修复后预测的最小置信度阈值
-            conservative_mode: 保守模式，修复到刚好正确就停止
-            fairness_mode: 是否启用公平性正则（仅在公平性实验中使用）
-            flip_fn: 函数，用于翻转敏感属性 flip_fn(sample, sensitive_indices, dataset_name, use_negation)
-            sensitive_indices: 敏感属性索引列表
-            dataset_name: 数据集名称（用于 flip_fn 内部策略）
-            num_random_trials: 公平性正则中用于随机扰动的轮数（通常可设为 0，仅用标准翻转）
-            lambda_fair: 公平性正则项权重
-            backdoor_mode: 是否处于后门修复场景（若为 True，则放宽回滚条件：
-                           只要预测不再等于原始后门预测即可视为成功）
-            kl_mode: 是否使用 KL 散度对齐 ref 输出分布代替 CrossEntropy loss。
-                     对 ACAS Xu 安全修复任务推荐开启（True），使修复目标与
-                     argmin 评估语义一致，避免 CE loss 方向与安全语义相反的问题。
-            argmin_mode: 若为 True，最终验证和早停均使用 argmin 语义（适用于 ACAS Xu）。
-                         默认 False（argmax，适用于分类/公平性任务）。
-            max_acc_drop: deprecated legacy parameter retained for compatibility.
-            enable_rollback: deprecated legacy parameter retained for compatibility.
+            buggy_sample: Buggy sample [C, H, W].
+            ref_sample: Reference sample, usually a similar correctly predicted sample [C, H, W].
+            target_label: Target label, usually the correct class.
+            epochs: Number of fine-tuning epochs.
+            lr: Learning rate.
+            lambda_reg: Deprecated legacy parameter retained for compatibility.
+            min_confidence: Minimum post-repair confidence threshold.
+            conservative_mode: Conservative mode; stop once the prediction is just corrected.
+            fairness_mode: Whether to enable the fairness regularizer; used only in fairness experiments.
+            flip_fn: Function for flipping sensitive attributes:
+                     flip_fn(sample, sensitive_indices, dataset_name, use_negation).
+            sensitive_indices: List of sensitive attribute indices.
+            dataset_name: Dataset name used by the internal flip_fn strategy.
+            num_random_trials: Number of random perturbation trials in the fairness regularizer;
+                               usually set to 0 when using only the standard flip.
+            lambda_fair: Weight of the fairness regularization term.
+            backdoor_mode: Whether the repair is in the backdoor setting. If True,
+                           the rollback condition is relaxed so that success can be
+                           defined by leaving the original backdoor prediction.
+            kl_mode: Whether to align the reference output distribution with KL
+                     divergence instead of CrossEntropy loss. This is recommended for
+                     ACAS Xu safety repair because it matches argmin evaluation semantics
+                     and avoids the mismatch between CE direction and safety semantics.
+            argmin_mode: If True, use argmin semantics for final verification and early stopping,
+                         which is suitable for ACAS Xu. Defaults to False, i.e., argmax,
+                         for classification and fairness tasks.
+            max_acc_drop: Deprecated legacy parameter retained for compatibility.
+            enable_rollback: Deprecated legacy parameter retained for compatibility.
 
         Returns:
-            bool: 是否修复成功
+            bool: Whether the repair succeeds.
         """
-        # ========== 1. 定义优化器（使用 SGD，momentum=0） ==========
         target_params = self.get_pathway_params()
         if len(target_params) == 0:
             print(">>> [Repair] Warning: No parameters to optimize!")
@@ -555,22 +563,20 @@ class ImitationRepair:
             conf_flip = float(flipped_probs[0, flipped_pred].item())
             classification_ok = int(pred_local) == int(target_label)
             consistency_ok = int(pred_local) == int(flipped_pred)
-            success = classification_ok and consistency_ok and (conf_orig >= min_confidence) and (conf_flip >= min_confidence)
+            success = classification_ok and consistency_ok and (conf_orig >= min_confidence) and \
+                        (conf_flip >= min_confidence)
             goal_conf = min(conf_orig, conf_flip)
             return success, goal_conf, pred_local, flipped_pred, conf_orig, conf_flip, classification_ok, consistency_ok
 
-        # ========== 3. 注册梯度掩码 hooks（严格稀疏微调） ==========
         grad_hooks = self._register_gradient_hooks(target_params)
 
-        # ========== 4. 预先获取参考样本的路径激活值 ==========
         ref_acts = self._get_reference_activations(ref_sample)
-        neg_acts = self._get_reference_activations(negative_ref_sample) if (contrastive_mode and negative_ref_sample is not None) else None
+        neg_acts = self._get_reference_activations(negative_ref_sample) if (
+                    contrastive_mode and negative_ref_sample is not None) else None
 
-        # ========== 5. 记录原始预测 & 提前缓存 ref_logits ==========
         self.model.eval()
         with torch.no_grad():
             original_output = self.model(buggy_in)
-            # 【修复】：正确使用 argmin 记录原始预测
             if argmin_mode:
                 original_pred = original_output.argmin(dim=1).item()
                 original_confidence = torch.softmax(-original_output, dim=1).max().item()
@@ -594,11 +600,9 @@ class ImitationRepair:
                     clean_total += clean_y_base.numel()
                 clean_acc_baseline = (clean_correct / clean_total) if clean_total > 0 else None
 
-            # 【核心修复】：在进入 Epoch 循环（注册 Hook）之前，提前算好 ref_logits！
-            # 这样就不会在循环内触发 Hook，覆盖掉 current_acts
             ref_logits_cached = self.model(ref_input).mean(dim=0, keepdim=True)
 
-        # ========== 6. 训练循环 ==========
+        # ========== 6. Training loop ==========
         self.model.train()
         print(f">>> [Repair] Start fine-tuning for {epochs} epochs...")
         print(f"    Learning rate: {lr}, Lambda_fair: {lambda_fair}")
@@ -622,14 +626,15 @@ class ImitationRepair:
         fairness_classification_first = fairness_mode and (not backdoor_mode) and (not argmin_mode)
         fairness_warmup_epochs = min(5, epochs) if fairness_classification_first else 0
         if fairness_classification_first and fairness_warmup_epochs > 0:
-            print(f"    Fairness classification-first warmup: {fairness_warmup_epochs} epochs (imitation temporarily disabled)")
+            print(
+                f"    Fairness classification-first warmup: {fairness_warmup_epochs} epochs (imitation temporarily disabled)")
 
         clean_iter = iter(clean_loader) if clean_loader is not None else None
         try:
             for epoch in range(epochs):
                 optimizer.zero_grad()
 
-                # 捕获当前的中间激活值
+                # Capture the current intermediate activations.
                 current_acts = {}
                 handles = []
 
@@ -645,10 +650,8 @@ class ImitationRepair:
                         handles.append(layer.register_forward_hook(get_curr_hook(l_count)))
                         l_count += 1
 
-                # 前向传播 (此时 Hook 正在工作，只收集 buggy_in 的激活值)
                 outputs = self.model(buggy_in)
 
-                # 【修复】：直接使用缓存的 ref_logits_cached，不再调用 self.model 破坏 Hook！
                 if kl_mode:
                     if argmin_mode:
                         loss_cls = F.kl_div(
@@ -668,32 +671,31 @@ class ImitationRepair:
                     else:
                         loss_cls = criterion_ce(outputs, target_tensor)
 
-                # 计算模仿损失（只在 pathway_masks 标记为 1 的神经元上计算 MSE）
                 loss_imitation = torch.tensor(0.0).to(self.device)
                 loss_contrastive = torch.tensor(0.0).to(self.device)
                 mask_idx = 0
                 for layer in self.layers_structure:
                     if isinstance(layer, (nn.Linear, nn.Conv2d)):
-                        if mask_idx >= len(self.pathway_masks) or mask_idx not in current_acts or mask_idx not in ref_acts:
+                        if mask_idx >= len(
+                                self.pathway_masks) or mask_idx not in current_acts or mask_idx not in ref_acts:
                             mask_idx += 1
                             continue
 
                         mask = self.pathway_masks[mask_idx]
                         act_bug = current_acts[mask_idx]
                         act_ref = ref_acts[mask_idx].to(self.device)
-                        act_neg = neg_acts[mask_idx].to(self.device) if neg_acts is not None and mask_idx in neg_acts else None
+                        act_neg = neg_acts[mask_idx].to(
+                            self.device) if neg_acts is not None and mask_idx in neg_acts else None
 
-                        # 对于Conv2d层，current_acts 是4D [batch, C, H, W]，做全局平均池化压缩到 [batch, C]
-                        # ref_acts 已在 _get_reference_activations 中提前池化为 [1, C]，无需再次池化
                         if isinstance(layer, nn.Conv2d):
                             act_bug = F.adaptive_avg_pool2d(act_bug, (1, 1)).squeeze(-1).squeeze(-1)
 
-                        # 核心：只计算 Mask 为 1 的部分的 MSE
+                        # Core step: compute MSE only on the masked units.
                         mask_expanded = mask.unsqueeze(0)  # [1, neurons/channels]
                         diff = act_bug - act_ref
                         diff_squared = (diff ** 2) * mask_expanded
 
-                        # 计算被 mask 的神经元的平均 MSE
+                        # Compute the average MSE over masked neurons.
                         num_masked = mask.sum()
                         if num_masked > 0:
                             layer_imitation_loss = diff_squared.sum() / num_masked
@@ -706,19 +708,16 @@ class ImitationRepair:
                                     act_neg = F.adaptive_avg_pool2d(act_neg, (1, 1)).squeeze(-1).squeeze(-1)
                                 pos_dist = F.mse_loss(act_bug * mask_expanded, act_ref * mask_expanded)
                                 neg_dist = F.mse_loss(act_bug * mask_expanded, act_neg * mask_expanded)
-                                loss_contrastive = loss_contrastive + torch.relu(pos_dist - neg_dist + contrastive_margin)
+                                loss_contrastive = loss_contrastive + torch.relu(
+                                    pos_dist - neg_dist + contrastive_margin)
 
                         mask_idx += 1
 
                 current_lambda = 0.0
 
-                # Fairness-only warmup is retained as a legacy branch but does not
-                # activate in the frozen default pipeline.
                 if fairness_classification_first and epoch < fairness_warmup_epochs and original_pred != target_label:
                     current_lambda = 0.0
 
-                # 添加置信度约束
-                # argmin_mode: ACAS Xu 用 argmin 决策（选最小 logit 的动作）
                 if argmin_mode:
                     pred = outputs.argmin(dim=1).item()
                     probs = torch.softmax(-outputs, dim=1)  # Negated for argmin!
@@ -731,7 +730,6 @@ class ImitationRepair:
                     confidence_penalty = (min_confidence - confidence) * 2.0
                     loss_cls = loss_cls + confidence_penalty
 
-                # 公平性正则项：完全可微的反事实概率分布对齐
                 loss_fair = torch.tensor(0.0, device=self.device)
                 if fairness_mode and flip_fn is not None and sensitive_indices is not None:
                     # 1. Generate the counterfactual sample
@@ -743,23 +741,15 @@ class ImitationRepair:
                     )
                     flipped_tensor = torch.tensor(flipped_np, dtype=buggy_in.dtype, device=self.device).unsqueeze(0)
 
-                    # 2. Get counterfactual logits
                     out_flipped = self.model(flipped_tensor)
 
-                    # 3. Compute differentiable distance
-                    # [修改] 弃用 Softmax MSE！在高置信度下会导致梯度消失。
-                    # 直接对 Logits 计算 MSE，能提供极其强烈的非饱和梯度，强迫两边分布完全对齐
                     loss_fair = F.mse_loss(outputs, out_flipped) * 5.0
 
-                # 干净样本重放：维持正常样本的分类能力
-                # fairness warmup 阶段临时关闭 clean replay，避免其在分类翻转前抵消修复方向。
                 fairness_disable_clean = False
                 effective_lambda_clean = lambda_clean
                 if fairness_classification_first and epoch < fairness_warmup_epochs and original_pred != target_label:
                     effective_lambda_clean = lambda_clean * fairness_warmup_clean_scale
-                # kl_mode + argmin_mode (ACAS Xu): 用 KL 自蒸馏对齐分布，防止 CE 方向干扰
-                # kl_mode + !argmin_mode (后门修复): 直接用标准 CE，KL(p||p)=0 无效
-                # !kl_mode: 分类任务统一使用标准 CE（公平性修复需要正向分类约束）
+
                 loss_clean = torch.tensor(0.0, device=self.device)
                 if clean_iter is not None and not fairness_disable_clean:
                     try:
@@ -773,7 +763,6 @@ class ImitationRepair:
                         clean_y = clean_y.to(self.device)
                         clean_outputs = self.model(clean_x)
                         if kl_mode and argmin_mode:
-                            # ACAS Xu: KL 自蒸馏保持输出分布稳定
                             with torch.no_grad():
                                 clean_ref_logits = clean_outputs.detach()
                             loss_clean = F.kl_div(
@@ -782,40 +771,31 @@ class ImitationRepair:
                                 reduction='batchmean'
                             )
                         elif kl_mode and not argmin_mode:
-                            # 后门修复：标准 CE 约束干净样本分类
                             loss_clean = criterion_ce(clean_outputs, clean_y)
                         else:
                             loss_clean = criterion_ce(clean_outputs, clean_y)
-                # 总损失
+                # Total loss.
                 total_loss = loss_cls + lambda_fair * loss_fair + effective_lambda_clean * loss_clean
 
-                # ========== NaN 检查（关键安全机制） ==========
                 if torch.isnan(total_loss) or torch.isinf(total_loss):
-                    print(f"    ⚠ Warning: Loss became NaN/Inf at epoch {epoch+1}, rolling back!")
-                    # 回滚模型权重
+                    print(f"    ⚠ Warning: Loss became NaN/Inf at epoch {epoch + 1}, rolling back!")
                     self.model.load_state_dict(model_backup)
-                    # 移除所有 hooks
                     for h in handles:
                         h.remove()
                     for h in grad_hooks:
                         h.remove()
                     return False
 
-                # 反向传播（梯度会被 hooks 自动掩码）
                 total_loss.backward()
 
-                # 梯度裁剪（防止梯度爆炸）
                 max_grad_norm = 1.0
                 torch.nn.utils.clip_grad_norm_(target_params, max_norm=max_grad_norm)
 
-                # 优化器更新
                 optimizer.step()
 
-                # 移除前向 hooks
                 for h in handles:
                     h.remove()
 
-                # 用 eval() 模式重新验证预测（消除 Dropout 的随机性，与最终验证一致）
                 self.model.eval()
                 with torch.no_grad():
                     eval_output = self.model(buggy_in)
@@ -828,7 +808,6 @@ class ImitationRepair:
                     eval_confidence = _goal_confidence(eval_probs)
                 self.model.train()
 
-                # 保存最佳模型（使用 eval 模式的预测，避免 Dropout 干扰）
                 loss_val = total_loss.item()
                 current_clean_acc = None
                 if clean_guard_enabled:
@@ -850,7 +829,8 @@ class ImitationRepair:
                     self.model.train()
 
                 if fairness_mode:
-                    eval_meets_goal, eval_confidence, eval_pred, eval_flip_pred, eval_conf_orig, eval_conf_flip, eval_classification_ok, eval_consistency_ok = _fairness_goal_status(eval_output)
+                    eval_meets_goal, eval_confidence, eval_pred, eval_flip_pred, eval_conf_orig, eval_conf_flip, eval_classification_ok, eval_consistency_ok = _fairness_goal_status(
+                        eval_output)
                 else:
                     if eval_pred == target_label:
                         eval_meets_goal = True
@@ -874,13 +854,16 @@ class ImitationRepair:
                                 is_better = True
                             elif best_clean_drop is None or clean_drop_now < best_clean_drop - 1e-8:
                                 is_better = True
-                            elif best_clean_drop is not None and abs(clean_drop_now - best_clean_drop) <= 1e-8 and eval_confidence > best_confidence:
+                            elif best_clean_drop is not None and abs(
+                                    clean_drop_now - best_clean_drop) <= 1e-8 and eval_confidence > best_confidence:
                                 is_better = True
                     else:
-                        if best_pred is None or not _prediction_satisfies_goal(best_pred) or eval_confidence > best_confidence:
+                        if best_pred is None or not _prediction_satisfies_goal(
+                                best_pred) or eval_confidence > best_confidence:
                             is_better = True
                 else:
-                    if loss_val < best_loss and ((best_pred is None) or (not _prediction_satisfies_goal(best_pred)) or loss_val < best_loss * 0.9):
+                    if loss_val < best_loss and ((best_pred is None) or (
+                    not _prediction_satisfies_goal(best_pred)) or loss_val < best_loss * 0.9):
                         is_better = True
 
                 if is_better:
@@ -899,7 +882,8 @@ class ImitationRepair:
                 if len(confidence_history) > 5:
                     confidence_history.pop(0)
 
-                if clean_guard_enabled and epoch_guard_eval_every > 0 and (epoch + 1) % epoch_guard_eval_every == 0 and current_clean_acc is not None:
+                if clean_guard_enabled and epoch_guard_eval_every > 0 and (
+                        epoch + 1) % epoch_guard_eval_every == 0 and current_clean_acc is not None:
                     clean_drop_now = clean_acc_baseline - current_clean_acc
                     tolerance = epoch_guard_acc_tolerance if epoch_guard_acc_tolerance is not None else max_acc_drop
                     if tolerance is not None and clean_drop_now > tolerance:
@@ -909,53 +893,56 @@ class ImitationRepair:
                         print(
                             f"    -> Epoch guard: clean_drop={clean_drop_now:.4f} exceeded tolerance={tolerance:.4f}; reducing LR {old_lr:.6f} -> {new_lr:.6f}"
                         )
-                        if fairness_mode and best_model_state is not None and best_pred is not None and _prediction_satisfies_goal(best_pred) and best_clean_acc is not None and (clean_acc_baseline - best_clean_acc) <= max_acc_drop:
+                        if fairness_mode and best_model_state is not None and best_pred is not None and _prediction_satisfies_goal(
+                                best_pred) and best_clean_acc is not None and (
+                                clean_acc_baseline - best_clean_acc) <= max_acc_drop:
                             print("    -> Epoch guard: restoring clean-aware best checkpoint and stopping early.")
                             self.model.load_state_dict({k: v.to(self.device) for k, v in best_model_state.items()})
                             repair_success = True
                             break
 
-                if fairness_mode and late_repair_stop_enabled and epoch + 1 >= late_repair_epoch_threshold and not eval_meets_goal and len(confidence_history) >= 5:
+                if fairness_mode and late_repair_stop_enabled and epoch + 1 >= late_repair_epoch_threshold and not eval_meets_goal and len(
+                        confidence_history) >= 5:
                     conf_gain = confidence_history[-1] - confidence_history[0]
                     if conf_gain < late_repair_min_confidence_growth:
                         print(
-                            f"    -> Late repair stop at epoch {epoch+1}: target confidence gain {conf_gain:.4f} < threshold {late_repair_min_confidence_growth:.4f}"
+                            f"    -> Late repair stop at epoch {epoch + 1}: target confidence gain {conf_gain:.4f} < threshold {late_repair_min_confidence_growth:.4f}"
                         )
                         break
 
-                # 打印进度（同时显示 train/eval 模式下的预测，便于调试）
                 if (epoch + 1) % 5 == 0 or epoch == 0:
                     ce_val = loss_cls.item()
                     imit_val = loss_imitation.item()
                     contrast_val = loss_contrastive.item() if 'loss_contrastive' in locals() else 0.0
                     current_lr = optimizer.param_groups[0]['lr']
                     if fairness_mode:
-                        print(f"    Epoch {epoch+1:3d}: Loss={loss_val:.4f} "
+                        print(f"    Epoch {epoch + 1:3d}: Loss={loss_val:.4f} "
                               f"(CE={ce_val:.4f}, Imit={imit_val:.4f}, Contra={contrast_val:.4f}), "
                               f"Pred={eval_pred}, FlipPred={eval_flip_pred}, Target={target_label}, "
                               f"Conf={eval_confidence:.4f}, OrigConf={eval_conf_orig:.4f}, FlipConf={eval_conf_flip:.4f}, LR={current_lr:.6f}")
                     else:
-                        print(f"    Epoch {epoch+1:3d}: Loss={loss_val:.4f} "
-                          f"(CE={ce_val:.4f}, Imit={imit_val:.4f}, Contra={contrast_val:.4f}), "
-                          f"Pred={eval_pred}, Target={target_label}, Conf={eval_confidence:.4f}, LR={current_lr:.6f}")
+                        print(f"    Epoch {epoch + 1:3d}: Loss={loss_val:.4f} "
+                              f"(CE={ce_val:.4f}, Imit={imit_val:.4f}, Contra={contrast_val:.4f}), "
+                              f"Pred={eval_pred}, Target={target_label}, Conf={eval_confidence:.4f}, LR={current_lr:.6f}")
 
-                # 保守模式早停（使用 eval 模式的预测，与最终验证一致）
                 if conservative_mode and eval_meets_goal:
                     can_accept_early = True
                     if use_clean_aware_selection and current_clean_acc is not None and clean_acc_baseline is not None and max_acc_drop is not None:
                         clean_drop_now = clean_acc_baseline - current_clean_acc
                         can_accept_early = clean_drop_now <= max_acc_drop
                         if not can_accept_early and ((epoch + 1) % 5 == 0 or epoch == 0):
-                            print(f"    -> Early-stop candidate rejected by clean guard: clean_drop={clean_drop_now:.4f}, threshold={max_acc_drop:.4f}")
+                            print(
+                                f"    -> Early-stop candidate rejected by clean guard: clean_drop={clean_drop_now:.4f}, threshold={max_acc_drop:.4f}")
 
                     if can_accept_early and eval_confidence >= min_confidence:
                         if fairness_mode:
                             print(
-                                f"    -> Early stop at epoch {epoch+1}: Fairness goal achieved "
+                                f"    -> Early stop at epoch {epoch + 1}: Fairness goal achieved "
                                 f"(pred={eval_pred}, flip_pred={eval_flip_pred}, target={target_label}, min_conf={eval_confidence:.4f})!"
                             )
                         else:
-                            print(f"    -> Early stop at epoch {epoch+1}: Prediction corrected with confidence {eval_confidence:.4f}!")
+                            print(
+                                f"    -> Early stop at epoch {epoch + 1}: Prediction corrected with confidence {eval_confidence:.4f}!")
                         repair_success = True
                         break
                     elif can_accept_early and eval_confidence >= min_confidence * 0.8:
@@ -963,11 +950,12 @@ class ImitationRepair:
                         if stable_count >= 2:
                             if fairness_mode:
                                 print(
-                                    f"    -> Early stop at epoch {epoch+1}: Fairness goal stable "
+                                    f"    -> Early stop at epoch {epoch + 1}: Fairness goal stable "
                                     f"(pred={eval_pred}, flip_pred={eval_flip_pred}, target={target_label}, min_conf={eval_confidence:.4f})!"
                                 )
                             else:
-                                print(f"    -> Early stop at epoch {epoch+1}: Prediction stable with confidence {eval_confidence:.4f}!")
+                                print(
+                                    f"    -> Early stop at epoch {epoch + 1}: Prediction stable with confidence {eval_confidence:.4f}!")
                             repair_success = True
                             break
                     else:
@@ -976,35 +964,33 @@ class ImitationRepair:
                     stable_count = 0
 
                 if no_improve_count >= early_stop_patience:
-                    print(f"    -> Early stop at epoch {epoch+1}: loss did not improve for {early_stop_patience} epochs.")
+                    print(
+                        f"    -> Early stop at epoch {epoch + 1}: loss did not improve for {early_stop_patience} epochs.")
                     repair_success = best_model_state is not None
                     break
 
-                # 标准早停条件（使用 eval 模式预测，与最终验证一致）
                 if not conservative_mode:
                     if eval_meets_goal and loss_cls.item() < 0.1:
-                        print(f"    -> Early stop at epoch {epoch+1}: Prediction corrected and loss converged!")
+                        print(f"    -> Early stop at epoch {epoch + 1}: Prediction corrected and loss converged!")
                         repair_success = True
                         break
 
         except Exception as e:
             print(f"    ⚠ Error during training: {e}, rolling back!")
-            # 回滚模型权重
+            # Roll back model weights.
             self.model.load_state_dict(model_backup)
-            # 移除所有 hooks
+            # Remove all hooks.
             for h in grad_hooks:
                 h.remove()
             return False
 
-        # ========== 7. 移除梯度 hooks ==========
         for h in grad_hooks:
             h.remove()
 
-        # ========== 8. 验证修复结果 ==========
         self.model.eval()
         with torch.no_grad():
             final_output = self.model(buggy_in)
-            # argmin_mode: ACAS Xu 用 argmin 决策
+            # argmin_mode: ACAS Xu uses argmin decisions.
             if argmin_mode:
                 final_pred = final_output.argmin(dim=1).item()
                 final_probs = torch.softmax(-final_output, dim=1)  # Negated for argmin!
@@ -1013,9 +999,8 @@ class ImitationRepair:
                 final_probs = torch.softmax(final_output, dim=1)
             final_confidence = _goal_confidence(final_probs)
 
-        # ========== 9. 安全回滚 / 后门模式下的放宽判定 ==========
         def _try_soft_rollback():
-            """在硬回滚前，先尝试权重插值软回滚。"""
+            """Try soft rollback by weight interpolation before hard rollback."""
             if not enable_rollback:
                 print("    -> Rollback disabled; keeping the current post-training weights.")
                 return False
@@ -1065,7 +1050,8 @@ class ImitationRepair:
                         clean_total += clean_y_chk.numel()
                 clean_acc_soft = (clean_correct / clean_total) if clean_total > 0 else None
                 if clean_acc_soft is not None and (clean_acc_baseline - clean_acc_soft) > max_acc_drop:
-                    print(f"    -> Soft Rollback rejected by clean ACC guard: baseline={clean_acc_baseline:.4f}, current={clean_acc_soft:.4f}, drop={clean_acc_baseline - clean_acc_soft:.4f}, threshold={max_acc_drop:.4f}")
+                    print(
+                        f"    -> Soft Rollback rejected by clean ACC guard: baseline={clean_acc_baseline:.4f}, current={clean_acc_soft:.4f}, drop={clean_acc_baseline - clean_acc_soft:.4f}, threshold={max_acc_drop:.4f}")
                     self.model.load_state_dict(backup_state)
                     return False
 
@@ -1075,7 +1061,7 @@ class ImitationRepair:
                           f"Pred={soft_pred}, Confidence={soft_confidence:.4f}")
                     return True
             else:
-                # 后门修复必须回到真实标签；仅仅脱离原始后门标签不算成功
+                # Backdoor repair must recover the true label; merely leaving the original backdoor label is not sufficient.
                 if soft_pred == target_label:
                     print(f"    -> Soft Rollback (Weight Interpolation) succeeded: "
                           f"Pred={soft_pred}, Confidence={soft_confidence:.4f}")
@@ -1100,18 +1086,22 @@ class ImitationRepair:
                     clean_total += clean_y_final.numel()
             clean_acc_final = (clean_correct / clean_total) if clean_total > 0 else None
             if clean_acc_final is not None and (clean_acc_baseline - clean_acc_final) > max_acc_drop:
-                if use_clean_aware_selection and best_model_state is not None and best_pred is not None and _prediction_satisfies_goal(best_pred) and best_clean_acc is not None and (clean_acc_baseline - best_clean_acc) <= max_acc_drop:
-                    print(f"    -> Restoring clean-aware best checkpoint before hard guard rollback: best_clean={best_clean_acc:.4f}, baseline={clean_acc_baseline:.4f}")
+                if use_clean_aware_selection and best_model_state is not None and best_pred is not None and _prediction_satisfies_goal(
+                        best_pred) and best_clean_acc is not None and (
+                        clean_acc_baseline - best_clean_acc) <= max_acc_drop:
+                    print(
+                        f"    -> Restoring clean-aware best checkpoint before hard guard rollback: best_clean={best_clean_acc:.4f}, baseline={clean_acc_baseline:.4f}")
                     self.model.load_state_dict({k: v.to(self.device) for k, v in best_model_state.items()})
                     return True
-                print(f"    ⚠ Clean ACC guard triggered before final accept: baseline={clean_acc_baseline:.4f}, current={clean_acc_final:.4f}, drop={clean_acc_baseline - clean_acc_final:.4f}, threshold={max_acc_drop:.4f}")
+                print(
+                    f"    ⚠ Clean ACC guard triggered before final accept: baseline={clean_acc_baseline:.4f}, current={clean_acc_final:.4f}, drop={clean_acc_baseline - clean_acc_final:.4f}, threshold={max_acc_drop:.4f}")
                 repair_success = _try_soft_rollback()
                 return repair_success
 
         if not backdoor_mode:
-            # 标准模式：必须修复到目标语义，否则回滚
             if fairness_mode:
-                final_meets_goal, final_confidence, final_pred, final_flip_pred, final_conf_orig, final_conf_flip, final_classification_ok, final_consistency_ok = _fairness_goal_status(final_output)
+                final_meets_goal, final_confidence, final_pred, final_flip_pred, final_conf_orig, final_conf_flip, final_classification_ok, final_consistency_ok = _fairness_goal_status(
+                    final_output)
             else:
                 final_meets_goal = _prediction_satisfies_goal(final_pred)
 
@@ -1123,7 +1113,8 @@ class ImitationRepair:
                         f"orig_conf={final_conf_orig:.4f}, flip_conf={final_conf_flip:.4f}; rolling back!"
                     )
                 else:
-                    print(f"    ⚠ Repair failed: Final prediction ({final_pred}) does not satisfy repair goal, rolling back!")
+                    print(
+                        f"    ⚠ Repair failed: Final prediction ({final_pred}) does not satisfy repair goal, rolling back!")
                 print("    -> Legacy rollback path disabled in frozen default pipeline.")
                 repair_success = False
             else:
@@ -1146,24 +1137,24 @@ class ImitationRepair:
             else:
                 print("    -> Legacy rollback path disabled in frozen default pipeline.")
                 repair_success = False
-        
+
         return repair_success
-    
+
     def repair_batch(self, buggy_samples, ref_samples, target_labels, epochs=50, lr=0.01, lambda_reg=1.0):
         """
-        批量修复多个样本（可选扩展）
-        
+        Repair multiple samples in a batch; optional extension.
+
         Args:
-            buggy_samples: List of buggy samples
-            ref_samples: List of reference samples
-            target_labels: List of target labels
-            
+            buggy_samples: List of buggy samples.
+            ref_samples: List of reference samples.
+            target_labels: List of target labels.
+
         Returns:
-            int: 成功修复的样本数
+            int: Number of successfully repaired samples.
         """
         success_count = 0
         for i, (buggy, ref, target) in enumerate(zip(buggy_samples, ref_samples, target_labels)):
-            print(f"\n>>> Repairing sample {i+1}/{len(buggy_samples)}...")
+            print(f"\n>>> Repairing sample {i + 1}/{len(buggy_samples)}...")
             if self.repair(buggy, ref, target, epochs=epochs, lr=lr):
                 success_count += 1
         return success_count

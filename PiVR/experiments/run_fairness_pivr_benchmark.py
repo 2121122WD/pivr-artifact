@@ -24,7 +24,7 @@ for _p in (cp_repair_path, repo_root):
         sys.path.insert(0, _p)
 
 from adapter_socrates import CPRepairSocrates
-from hyperparameters_config import FAIRNESS_UNIFIED_CONFIG
+from config import FAIRNESS_UNIFIED_CONFIG
 
 
 def _resolve_fairness_path(path_value: str) -> str:

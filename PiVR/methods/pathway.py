@@ -1,17 +1,19 @@
 """
-PathwayDeepCP: NP-SBFL 故障定位实现（严格对齐原论文）
+Core principles:
+1. LRP relevance propagation: compute each neuron's contribution to the output.
+2. Critical neuron extraction: find the smallest neuron set whose accumulated
+   LRP relevance is greater than or equal to alpha * g_f(x).
+3. Hit Spectrum construction: count critical-neuron hits on Pass/Fail samples.
+4. SBFL suspiciousness scoring: compute each neuron's suspiciousness based on
+   the Hit Spectrum.
+5. Top-k mask generation: select the Top-k suspicious neurons in each layer and
+   generate binary masks.
 
-核心原理：
-1. LRP 相关性传播：计算每个神经元对输出的贡献度
-2. 关键神经元提取：找最小神经元集合，使其 LRP 相关性和 >= α * g_f(x)
-3. Hit Spectrum 统计：统计关键神经元在 Pass/Fail 样本中的激活情况
-4. SBFL 可疑度计算：基于 Hit Spectrum 计算每个神经元的可疑度
-5. Top-k 掩码生成：每层选 Top-k 可疑神经元，生成二值掩码
-
-注意：
-- 不追踪显式路径元组（避免组合爆炸）
-- 使用数学上正确的 I_P/I_F 计算方式
-- 当前实现不再包含 Adaptive Connectivity Pruning 后处理
+Notes:
+- This implementation does not explicitly track path tuples to avoid
+  combinatorial explosion.
+- I_P and I_F are computed using the mathematically correct definitions.
+- Adaptive Connectivity Pruning post-processing is no longer included.
 """
 
 import os
@@ -34,15 +36,19 @@ from PiVR.utils import (
 
 class PathwayDeepCP:
     """
-    NP-SBFL 故障定位核心实现（面向修复任务增强版）
+    Pathway localization module used by PiVR.
 
-    相比原始 NP-SBFL，本实现新增两类关键增强：
-    1. Layer-Adaptive Critical Neuron Extraction：
-       不再强制所有层共享全局 relevance budget，而是支持每层使用
-       自身的正相关性覆盖预算，缓解层间尺度不一致问题。
-    2. Task-Aware Hit Spectrum Construction：
-       Pass/Fail 不再仅由“预测是否等于标签”决定，而可由外部 violation_fn
-       按安全性 / 后门 / 公平性等任务语义定义，使定位结果更贴近后续修复目标。
+    Compared with the original NP-SBFL implementation, this version adds two
+    task-oriented enhancements:
+    1. Layer-Adaptive Critical Neuron Extraction:
+       Instead of forcing all layers to share a global relevance budget, each
+       layer can use its own positive-relevance coverage budget. This mitigates
+       scale mismatch across layers.
+    2. Task-Aware Hit Spectrum Construction:
+       Pass/Fail labels are not limited to whether the prediction equals the
+       ground-truth label. They can also be defined by an external violation_fn
+       for safety, backdoor, fairness, or other task-specific semantics, making
+       localization better aligned with the downstream repair objective.
     """
 
     def __init__(self, model_name, model, layers_structure, alpha=0.7, beta=0.0,
@@ -61,36 +67,7 @@ class PathwayDeepCP:
                  min_layer_k=1,
                  max_layer_k=None,
                  small_layer_full_preserve=3):
-        """
-        Args:
-            model_name: 模型名称
-            model: PyTorch 模型
-            layers_structure: 模型层结构列表
-            alpha: 关键神经元提取阈值
-            beta: 保留兼容字段（当前未使用）
-            activation_threshold: 激活值阈值（通常为 0）
-            input_size: 输入尺寸
-            train_loader: 训练数据加载器（batch_size 必须为 1）
-            path_to_save_pickles: 保存路径
-            device: 计算设备
-            argmin_mode: 是否以 argmin 作为预测语义（ACAS Xu）
-            k: Top-k suspicious neurons per layer
-            layer_k_ratio_cap: 每层最多保留的比例上限
-            critical_budget_mode:
-                - "global": 复现 NP-SBFL，使用 alpha * g_f(x)
-                - "layer_adaptive": 使用 alpha * sum(max(R_l, 0))
-                - "hybrid": max(alpha * g_f(x) * min_ratio, alpha * layer_positive_sum)
-            layer_budget_min_ratio: hybrid/global fallback 的最小层预算比例
-            task_type: "classification" / "safety" / "backdoor" / "fairness"
-            violation_fn:
-                可选函数 violation_fn(data, target, predicted_class, model, argmin_mode) -> bool
-                返回 True 表示 Fail/Violation，False 表示 Pass。
-            failure_score_fn:
-                可选函数 failure_score_fn(data, target, predicted_class, model, argmin_mode) -> float
-                返回样本级 fail 权重（>=0）。若为空，则默认使用 1.0。
-            failure_score_power:
-                对 failure_score_fn 输出做幂次缩放，控制 fail 样本的加权强度。
-        """
+
         self.model_name = model_name
         self.input_size = input_size
         self.alpha = alpha
@@ -121,12 +98,9 @@ class PathwayDeepCP:
         self.layers_structure = layers_structure
         self.lrp_model = myLRPModel(model, layers_structure)
 
-        # 缓存 Hit Spectrum，避免重复计算
+        # Cache Hit Spectrums to avoid redundant computation.
         self._cached_hit_spectrums = None
 
-        # 自动检测是否含有 Conv2d 层（决定 SBFL 定位范围）
-        # 含 Conv2d（如 GTSRB CNN）：同时定位 Conv2d + Linear 层（与 NP-SBFL Model4 对齐）
-        # 纯 Linear（如 ACAS Xu、公平性 MLP）：只定位 Linear 层（保持原有逻辑不变）
         self.has_conv = any(isinstance(l, nn.Conv2d) for l in layers_structure)
         if self.has_conv:
             self._lrp_filter_types = ["RelevancePropagationConv2d", "RelevancePropagationLinear"]
@@ -134,7 +108,7 @@ class PathwayDeepCP:
             self._lrp_filter_types = ["RelevancePropagationLinear"]
         print(f"[PathwayDeepCP] has_conv={self.has_conv}, SBFL filter: {self._lrp_filter_types}")
 
-        # 获取层形状
+        # Infer layer shapes.
         model_device = next(self.model.parameters()).device if any(True for _ in self.model.parameters()) else torch.device("cuda" if self.cuda else "cpu")
         _, activations, _, _ = self.get_relevancy_and_activations(
             torch.randn((1, *self.input_size), device=model_device)
@@ -179,18 +153,19 @@ class PathwayDeepCP:
 
     def get_relevancy_and_activations(self, data):
         """
-        获取 LRP 相关性和激活值
+        Get LRP relevancies and activations.
 
         Args:
-            data: 输入张量，shape = (1, *input_size)，batch_size 必须为 1
-            
+            data: Input tensor with shape (1, *input_size). The batch size must
+                be 1.
+
         Returns:
-            relevancy: list[tensor]，每层的 LRP 相关性
-            activations: list[tensor]，每层的激活值
-            g_fx: float，总相关性（输出层相关性和）
-            predicted_class: int，预测类别
+            relevancy: list[tensor], LRP relevance values for each layer.
+            activations: list[tensor], activation values for each layer.
+            g_fx: float, total relevance, computed as the output-layer
+                relevance sum.
+            predicted_class: int, predicted class.
         """
-        # 确保输入在正确的设备上
         try:
             model_device = next(self.model.parameters()).device
             if hasattr(data, "to"):
@@ -198,19 +173,16 @@ class PathwayDeepCP:
         except StopIteration:
             pass
 
-        # 确保 batch_size == 1
+        # Ensure that batch_size == 1.
         if data.shape[0] != 1:
             raise ValueError(f"batch_size must be 1, got {data.shape[0]}")
 
         relevancies, activations = self.lrp_model.forward(data)
 
-        # 移除最后一层激活（输出层）
         activations = activations[:-1]
 
-        # 过滤相关层的相关性和激活
         filter_types = self._lrp_filter_types
 
-        # relevancy：Conv2d 保留空间热点统计，Linear 直接 flatten
         def process_relevancy(item):
             name, rel = item
             if name == "RelevancePropagationConv2d":
@@ -221,7 +193,7 @@ class PathwayDeepCP:
         relevancy = list(map(process_relevancy, relevancy))
 
         activations = list(filter(lambda item: item[0] in filter_types, activations))
-        # Conv2d 激活：保留空间热点统计；Linear 激活直接 flatten
+        # Conv2d activations keep spatial hot-spot statistics; Linear activations are flattened directly.
         def process_activation(item):
             name, act = item
             if name == "RelevancePropagationConv2d":
@@ -230,10 +202,10 @@ class PathwayDeepCP:
                 return F.relu(act).flatten(1) if name == "RelevancePropagationLinear" else act.flatten(1)
         activations = list(map(process_activation, activations))
 
-        # 总相关性（输出层）
+        # Total relevance from the output layer.
         g_fx = torch.sum(relevancies[0][1]).item()
 
-        # 预测类别 (支持 argmin/argmax 模式)
+        # Predicted class, supporting both argmin and argmax modes.
         if self.argmin_mode:
             predicted_class = torch.argmin(relevancies[-1][1], dim=1).item()
         else:
@@ -248,11 +220,13 @@ class PathwayDeepCP:
 
     def _is_fail_sample(self, data, target, predicted_class):
         """
-        判定样本是否属于 Fail / Violation。
+        Determine whether a sample is a Fail/Violation sample.
 
-        默认行为：
-        - classification/backdoor/safety: 预测是否等于 target
-        - fairness: 若提供 violation_fn，则使用外部任务语义（通常是原样本与翻转样本的一致性）
+        Default behavior:
+        - classification/backdoor/safety: compare the prediction with target.
+        - fairness: if violation_fn is provided, use external task semantics,
+          typically consistency between the original sample and its
+          protected-attribute-flipped counterpart.
         """
         if self.violation_fn is not None:
             return bool(self.violation_fn(
@@ -266,8 +240,10 @@ class PathwayDeepCP:
 
     def _get_failure_weight(self, data, target, predicted_class, is_fail):
         """
-        获取样本级 fail 权重。
-        用于构造 task-aware / severity-aware Hit Spectrum。
+        Get the sample-level failure weight.
+
+        This weight is used to construct a task-aware or severity-aware Hit
+        Spectrum.
         """
         if not is_fail:
             return 1.0
@@ -287,22 +263,24 @@ class PathwayDeepCP:
 
     def generate_cdp_representation(self, data):
         """
-        为单个样本生成 CDP 表示（关键神经元集合）
-        
+        Generate the CDP representation, i.e., the critical-neuron set, for a
+        single sample.
+
         Args:
-            data: 输入张量，shape = (1, *input_size)
+            data: Input tensor with shape (1, *input_size).
 
         Returns:
-            cdp_representation: shape = (sum(layer_shapes),) 的 0/1 向量
-            critical_neurons_layers: list[tensor]，每层关键神经元索引
-            predicted_class: int，预测类别
-            activation_mask: shape = (sum(layer_shapes),) 的 0/1 向量
+            cdp_representation: 0/1 vector with shape (sum(layer_shapes),).
+            critical_neurons_layers: list[tensor], critical-neuron indices for
+                each layer.
+            predicted_class: int, predicted class.
+            activation_mask: 0/1 vector with shape (sum(layer_shapes),).
         """
         relevancy, activations, g_fx, predicted_class = self.get_relevancy_and_activations(data)
 
-        # Step 2a：关键神经元提取
-        # 创新：支持 Layer-Adaptive / Hybrid relevance budget，
-        # 不再局限于 NP-SBFL 的全局 alpha * g_f(x)
+        # Step 2a: Critical neuron extraction.
+        # This version supports a layer-adaptive relevance budget
+        # instead of the global alpha * g_f(x) budget used by NP-SBFL.
         critical_neurons_layers = []
         for i in range(1, len(relevancy)):
             layer_budget = self._get_layer_budget(relevancy[i][0], g_fx)
@@ -311,20 +289,20 @@ class PathwayDeepCP:
                 return None, None, None, None
             critical_neurons_layers.append(critical_neurons_layer)
 
-        # 生成 CDP 表示：关键神经元位置为 1，其余为 0
+        # Generate the CDP representation: critical-neuron positions are 1 and all others are 0.
         cdp_representation = np.zeros(sum(self.layer_shapes))
         indices = np.cumsum([0] + self.layer_shapes)
         for i in range(len(critical_neurons_layers)):
             layer_size = self.layer_shapes[i]
             raw_indices = critical_neurons_layers[i].cpu().numpy()
-            # 越界保护：截断超出当前层大小的神经元索引
+            # Boundary protection: discard neuron indices outside the current layer size.
             valid_indices = raw_indices[raw_indices < layer_size]
             if len(valid_indices) == 0 and len(raw_indices) > 0:
-                # 若所有索引都越界，取模映射到有效范围
+                # If all indices are out of range, map them back to the valid range by modulo.
                 valid_indices = raw_indices % layer_size
             cdp_representation[indices[i] + valid_indices] = 1
 
-        # 生成激活掩码：默认以 activation > 0 作为 hit 条件
+        # Generate the activation mask. By default, activation > 0 is treated as a hit.
         activations_vector = np.zeros(sum(self.layer_shapes))
         indices = np.cumsum([0] + self.layer_shapes)
         for i in range(indices.shape[0] - 1):
@@ -342,31 +320,26 @@ class PathwayDeepCP:
 
     def calculate_neuron_hit_spectrums(self):
         """
-        Step 2b：统计关键神经元的 Hit Spectrum 四元组 (A_P, A_F, I_P, I_F)
-        
-        数学上正确的实现：
-        - A_P：关键神经元在 Pass 样本中被激活的次数
-        - A_F：关键神经元在 Fail 样本中被激活的次数
-        - I_P：关键神经元在 Pass 样本中未被激活的次数
-        - I_F：关键神经元在 Fail 样本中未被激活的次数
-        
-        关键修复：
-        - I_P = total_passed - A_P（而非 (1 - activation_mask) * critical_neurons_vector）
-        - I_F = total_failed - A_F
-        
-        缓存机制：避免重复计算
-        
+        Step 2b: Count the Hit Spectrum tuple (A_P, A_F, I_P, I_F) for critical
+        neurons.
+
+        Mathematically correct implementation:
+        - A_P: number of times critical neurons are activated on Pass samples.
+        - A_F: number of times critical neurons are activated on Fail samples.
+        - I_P: number of times critical neurons are inactive on Pass samples.
+        - I_F: number of times critical neurons are inactive on Fail samples.
+
         Returns:
             dict: {"A_P": np.array, "A_F": np.array, "I_P": np.array, "I_F": np.array}
         """
-        # 如果已缓存，直接返回
+        # Return cached results if available.
         if self._cached_hit_spectrums is not None:
             print("[PathwayDeepCP] Using cached Hit Spectrums (avoiding recomputation)")
             return self._cached_hit_spectrums
-        
+
         total_neurons = sum(self.layer_shapes)
-        
-        # 初始化计数器
+
+        # Initialize counters.
         A_P = np.zeros(total_neurons)
         A_F = np.zeros(total_neurons)
         total_passed = 0.0
@@ -381,12 +354,12 @@ class PathwayDeepCP:
 
             data, target = Variable(data), Variable(target)
 
-            # 生成 CDP 表示
+            # Generate the CDP representation.
             cdp_representation, _, predicted_class, activation_mask = self.generate_cdp_representation(data)
             if cdp_representation is None:
                 continue
 
-            # Hit 掩码：关键神经元 AND 激活
+            # Hit mask: critical-neuron mask AND activation mask.
             hit_mask = activation_mask * cdp_representation
 
             # Task-aware pass/fail + severity-aware weighting
@@ -400,41 +373,45 @@ class PathwayDeepCP:
                 A_P += hit_mask
                 total_passed += 1.0
 
-        # 计算 I_P 和 I_F（数学上正确）
+        # Compute I_P and I_F using the mathematically correct definitions.
         I_P = total_passed - A_P
         I_F = total_failed - A_F
 
-        # 缓存结果
+        # Cache the results.
         self._cached_hit_spectrums = {
             "A_P": A_P,
             "A_F": A_F,
             "I_P": I_P,
             "I_F": I_F,
         }
-        
+
         return self._cached_hit_spectrums
 
     def get_scores_from_spectrums(self, neuron_hit_spectrums, sfl_strategy):
         """
-        Step 2c：基于 Hit Spectrum 计算 SBFL 可疑度
-        
+        Step 2c: Compute SBFL suspiciousness based on the Hit Spectrum.
+
         Args:
-            neuron_hit_spectrums: dict，包含 A_P, A_F, I_P, I_F
-            sfl_strategy: legacy argument retained for compatibility; Barinel is used by default            
+            neuron_hit_spectrums: dict containing A_P, A_F, I_P, and I_F.
+            sfl_strategy: legacy argument retained for compatibility; Barinel
+                is used by default.
+
         Returns:
-            np.array: 每个神经元的可疑度分数
+            np.array: suspiciousness score for each neuron.
         """
         return get_BARINEL_score(neuron_hit_spectrums)
 
     def get_layerwise_suspiciousness_scores(self, scores_vector):
         """
-        将全局可疑度向量分解为按层的可疑度列表
-        
+        Split the global suspiciousness vector into layer-wise suspiciousness
+        lists.
+
         Args:
-            scores_vector: shape = (sum(layer_shapes),) 的可疑度向量
-            
+            scores_vector: suspiciousness vector with shape
+                (sum(layer_shapes),).
+
         Returns:
-            list[list[(neuron_idx, score)]]: 每层一个列表
+            list[list[(neuron_idx, score)]]: one list for each layer.
         """
         layerwise_scores = []
         indices = np.cumsum([0] + self.layer_shapes)
@@ -446,14 +423,16 @@ class PathwayDeepCP:
 
     def get_suspicious_neurons_per_layer(self, sfl_strategy, k):
         """
-        Step 2d：每层取 Top-k 可疑神经元
-        
+        Step 2d: Select the Top-k suspicious neurons from each layer.
+
         Args:
-            sfl_strategy: legacy argument retained for compatibility; Barinel is used by default
-            k: 每层 Top-k 数量
+            sfl_strategy: legacy argument retained for compatibility; Barinel
+                is used by default.
+            k: number of Top-k neurons selected per layer.
 
         Returns:
-            list[list[(neuron_idx, score)]]: 每层的 Top-k 神经元及其分数
+            list[list[(neuron_idx, score)]]: Top-k neurons and their scores for
+                each layer.
         """
         neuron_hit_spectrums = self.calculate_neuron_hit_spectrums()
         scores_vector = self.get_scores_from_spectrums(neuron_hit_spectrums, sfl_strategy)
@@ -470,29 +449,11 @@ class PathwayDeepCP:
         return suspicious_neurons_per_layer
 
     def get_topk_indices_and_mask(self, sfl_strategy="barinel", k=5, return_flattened_mask=True):
-        """
-        主要输出方法：生成 Top-k 可疑神经元和对应的二值掩码
 
-        流程：
-        1. 计算 Hit Spectrum
-        2. 计算 SBFL 可疑度
-        3. 每层取 Top-k
-        4. 生成二值掩码
-
-        Args:
-            sfl_strategy: "tarantula" / "ochiai" / "barinel"
-            k: 每层 Top-k 数量
-            return_flattened_mask: True 返回扁平掩码，False 返回分层掩码
-
-        Returns:
-            (suspicious_neurons_per_layer, mask)
-            - suspicious_neurons_per_layer: list[list[(idx, score)]]
-            - mask: np.ndarray（扁平）或 list[np.ndarray]（分层）
-        """
         suspicious_neurons_per_layer = self.get_suspicious_neurons_per_layer(sfl_strategy, k)
 
         if return_flattened_mask:
-            # 生成扁平掩码
+            # Generate a flattened mask.
             flat_mask = np.zeros(sum(self.layer_shapes), dtype=np.int64)
             indices = np.cumsum([0] + self.layer_shapes)
             for layer_idx, layer_list in enumerate(suspicious_neurons_per_layer):

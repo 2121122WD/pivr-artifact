@@ -12,17 +12,15 @@ import copy
 from datetime import datetime
 from tqdm import tqdm
 
-# 设置路径：必须在 import PiVR 之前
 current_dir = os.path.dirname(os.path.abspath(__file__))
 my_algorithm_dir = os.path.dirname(current_dir)  # PiVR
 np_sbfl_dir = os.path.dirname(my_algorithm_dir)
 project_root = os.path.dirname(np_sbfl_dir)
 
-# 匿名 artifact 内置 benchmark 根目录：PiVR/benchmark/benchmark
 BENCHMARK_ROOT = os.path.join(my_algorithm_dir, 'benchmark', 'benchmark')
 ACAS_BENCHMARK_ROOT = BENCHMARK_ROOT
 
-# 兼容从 artifact 根目录或 PiVR 目录运行脚本
+
 for _p in (np_sbfl_dir, my_algorithm_dir):
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -35,7 +33,7 @@ from utils import (
     load_h5_dataset,
     numpy_to_torch_dataloader,
 )
-from hyperparameters_config import (
+from config import (
     PATHWAY_CONFIG,
     SAFETY_UNIFIED_CONFIG,
     SBFL_CONFIG,

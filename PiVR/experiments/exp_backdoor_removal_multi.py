@@ -15,7 +15,6 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from tqdm import tqdm
 
-# Windows 默认控制台可能是 GBK，包含符号字符会报编码错误；强制切换到 UTF-8
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
@@ -25,13 +24,10 @@ my_algorithm_dir = os.path.dirname(current_dir)  # PiVR
 np_sbfl_dir = os.path.dirname(my_algorithm_dir)  # artifact 根目录
 project_root = os.path.dirname(np_sbfl_dir)
 
-# 匿名 artifact 内置 benchmark 根目录：PiVR/benchmark/benchmark
-# 下面大量历史代码使用 os.path.join(care_main_dir, 'benchmark', 'benchmark', ...)，
-# 因此这里将 care_main_dir 设为 PiVR，使最终路径解析为 PiVR/benchmark/benchmark/...
+
 care_main_dir = my_algorithm_dir
 BENCHMARK_ROOT = os.path.join(my_algorithm_dir, 'benchmark', 'benchmark')
 
-# 兼容从 artifact 根目录或 PiVR 目录运行脚本
 for _p in (np_sbfl_dir, my_algorithm_dir):
     if _p not in sys.path:
         sys.path.insert(0, _p)
@@ -41,7 +37,7 @@ from methods.verifier import CausalVerifier
 from methods.repair import ImitationRepair
 
 from PiVR.utils import numpy_to_torch_dataloader
-from hyperparameters_config import (
+from config import (
     PATHWAY_CONFIG,
     BACKDOOR_UNIFIED_CONFIG,
     BACKDOOR_DATASET_OVERRIDES,

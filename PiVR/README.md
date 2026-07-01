@@ -21,9 +21,24 @@ The current artifact includes the PiVR source code, experiment entry scripts, ut
 ```text
 PiVR/
 ├── experiments/
-│   ├── exp_safety_acas.py
+│   ├── results/
+│   │   ├── rq2_ablation_result.csv
+│   │   ├── rq4_k_result.csv
+│   │   └── rq4_repair_stage_stability_result.csv
+│   ├── adapter_socrates.py
+│   ├── analyze_rq2_ablation.py
+│   ├── analyze_rq4_repair_sensitivity_plot.py
 │   ├── exp_backdoor_removal_multi.py
-│   └── run_fairness_pivr_benchmark.py
+│   ├── exp_safety_acas.py
+│   ├── grid_backdoor.json
+│   ├── grid_fairness.json
+│   ├── grid_safety.json
+│   ├── hyperparameters_config.py
+│   ├── run_fairness_pivr_benchmark.py
+│   ├── run_param_sensitivity.py
+│   ├── run_rq2_ablation.ps1
+│   ├── run_rq4_localization_stability.ps1
+│   └── run_rq4_repair_sensitivity.ps1
 ├── lrp_src/
 ├── methods/
 │   ├── pathway.py
@@ -36,13 +51,13 @@ PiVR/
 └── utils.py
 ```
 
-## Main Experiment Entry Points
+## Experiment Files
 
-The artifact contains three experiment entry scripts:
+The `experiments/` directory contains the main experiment entries, RQ scripts, configuration files, and processed results.
 
-- **Safety repair**: `experiments/exp_safety_acas.py`
-- **Backdoor removal**: `experiments/exp_backdoor_removal_multi.py`
-- **Fairness repair**: `experiments/run_fairness_pivr_benchmark.py`
+- Single-task entries: `exp_backdoor_removal_multi.py`, `exp_safety_acas.py`, and `run_fairness_pivr_benchmark.py`.
+- RQ scripts: `run_rq2_ablation.ps1`, `run_rq4_localization_stability.ps1` and `run_rq4_repair_sensitivity.ps1`.
+- Processed RQ results: `results/rq2_ablation_result.csv`, `results/rq4_k_result.csv`, and `results/rq4_repair_stage_stability_result.csv`.
 
 ## Benchmark Data and Model Files
 
@@ -125,7 +140,7 @@ Other fairness settings depend on the tabular datasets and models placed under `
 
 ## Result Files
 
-This artifact include result files used for checking the reported experimental outcomes. 
+Processed RQ results are stored in `experiments/results/`. They can be inspected directly without re-running the full experiments. Full reproduction requires the benchmark datasets and pretrained models described above.
 
 ## Notes for Double-Anonymous Review
 

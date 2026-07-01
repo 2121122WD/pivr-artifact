@@ -19,7 +19,7 @@ from methods.pathway import PathwayDeepCP
 from methods.verifier import CausalVerifier
 from methods.repair import ImitationRepair
 from utils import numpy_to_torch_dataloader
-from hyperparameters_config import (
+from config import (
     FAIRNESS_UNIFIED_CONFIG,
     FAIRNESS_DATASET_OVERRIDES,
     PATHWAY_CONFIG,

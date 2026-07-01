@@ -48,7 +48,7 @@ param(
     [switch]$DryRun,
 
     # Seeds. Use one seed for quick stability inspection, or multiple for a stronger study.
-    [int[]]$Seeds = @(0,1,2,3,4),
+    [int[]]$Seeds = @(0,1,2),
 
     # Representative settings. These include both easy and harder settings.
     [string[]]$BackdoorDatasets = @("MNIST","Fashion-MNIST","GTSRB","CIFAR-10"),
